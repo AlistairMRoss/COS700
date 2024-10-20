@@ -38,13 +38,3 @@ bool FirmwareReader::readChunk(uint8_t* buffer, size_t offset, size_t length) {
     
     return true;
 }
-
-void FirmwareReader::printHex(uint8_t* buffer, size_t length) {
-    for (size_t i = 0; i < length; i++) {
-        if (i > 0 && i % 16 == 0) {
-            Serial.println();
-        }
-        Serial.printf("%02X ", buffer[i]);
-    }
-    Serial.println();
-}

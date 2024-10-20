@@ -1,44 +1,49 @@
-#ifndef WIFI_MANAGER_H
-#define WIFI_MANAGER_H
+#ifndef WIFI_FUNCTIONS_H
+#define WIFI_FUNCTIONS_H
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiManager.h> 
 #include <Preferences.h>
 #include <HTTPClient.h>
+#include <SPIFFS.h>
+#include <time.h>
 
-#define PREFS_NAMESPACE "experiement"
+#define PORTAL_TIMEOUT 180
+#define AP_NAME "YourDeviceName"
 #define WIFI_MAX_RECONNECT_TRIES 25
 #define CONNECT_TIMEOUT 10000
-#define AP_NAME "GEM"
 #define NTP_SERVER "pool.ntp.org"
 #define GMT_OFFSET 3600
 #define DAYLIGHT_OFFSET 3600
-#define LONG_PRESS_TIME 500
 #define FORCE_CONNECT_INTERVAL 1000 * 60 * 5 
 #define REBOOT_INTERVAL 1000 * 60 * 30
 #define QUERY_INTERVAL 1000 * 60 * 60
+#define PREFS_NAMESPACE "experiment"
 
-class WiFiManager {
+class WifiFunctions {
 public:
-    WiFiManager();
+    WifiFunctions();
     void setup();
     void loop();
-    bool isOffline() const;
+    bool checkWifi();
+    void tryConnect();
+    bool getConnected();
+    void queryEndpoint();
+    String getCurrentTime();
 
 private:
-    void connectToNetwork(uint8_t idx, const char* password);
-    void scanForNetworks();
+    void force_connect();
     void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
     void WiFiDisconnected(WiFiEvent_t event, WiFiEventInfo_t info);
-    void force_connect();
-    void queryEndpoint();
 
+    bool connected;
     bool WiFiOffline;
     unsigned long last_connected;
     unsigned long last_force_connected;
     unsigned long last_query_time;
-    Preferences prefs;
     bool queried;
+    Preferences prefs;
 };
 
 #endif
