@@ -1,6 +1,13 @@
 #include "WifiFunctions.h"
 
-WifiFunctions::WifiFunctions() : connected(false), WiFiOffline(true), last_connected(millis()), last_force_connected(0), last_query_time(0), queried(false) {}
+WifiFunctions* WifiFunctions::instance = nullptr;
+
+WifiFunctions::WifiFunctions() 
+    : connected(false), WiFiOffline(true), last_connected(millis()), 
+      last_force_connected(0), last_query_time(0), queried(false),
+      awsFunctions(staticAwsMessageCallback) {
+    instance = this;
+}
 
 void WifiFunctions::setup() {
     delay(1000);
@@ -21,6 +28,13 @@ void WifiFunctions::setup() {
         connected = true;
         WiFiOffline = false;
         Serial.println("Connection successful!");
+
+        Serial.println("attempting MQTT");
+        if (awsFunctions.connectAWS()) {
+            Serial.println("AWS connection successful!");
+        } else {
+            Serial.println("AWS connection failed!");
+        }
     }
 }
 
@@ -32,13 +46,6 @@ void WifiFunctions::loop() {
         }
         if (last_force_connected + FORCE_CONNECT_INTERVAL < millis()) {
             force_connect();
-        }
-    } else {
-        // if (!queried) {
-        //     queryEndpoint();
-        // }
-        if (millis() - last_query_time >= QUERY_INTERVAL) {
-            queryEndpoint();
         }
     }
 }
@@ -224,5 +231,27 @@ void WifiFunctions::WiFiDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
         char str[100];
         sprintf(str, "WiFi Disconnected: %i ", info.wifi_sta_disconnected.reason);
         Serial.println(str);
+    }
+}
+
+void WifiFunctions::staticAwsMessageCallback(char* topic, byte* payload, unsigned int length) {
+    if (instance) {
+        instance->awsMessageCallback(topic, payload, length);
+    }
+}
+
+void WifiFunctions::awsMessageCallback(char* topic, byte* payload, unsigned int length) {
+    char message[length + 1];
+    memcpy(message, payload, length);
+    message[length] = '\0';
+
+    Serial.print("Message arrived [");
+    Serial.print(topic);
+    Serial.print("] ");
+    Serial.println(message);
+
+    if (strcmp(message, "update") == 0) {
+        Serial.println("Update command received. Querying endpoint...");
+        queryEndpoint();
     }
 }

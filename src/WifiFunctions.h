@@ -8,6 +8,7 @@
 #include <HTTPClient.h>
 #include <SPIFFS.h>
 #include <time.h>
+#include "awsFunctions.h"
 
 #define PORTAL_TIMEOUT 180
 #define AP_NAME "YourDeviceName"
@@ -37,13 +38,19 @@ private:
     void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
     void WiFiDisconnected(WiFiEvent_t event, WiFiEventInfo_t info);
 
+    void awsMessageCallback(char* topic, byte* payload, unsigned int length);
+    static WifiFunctions* instance;
+    static void staticAwsMessageCallback(char* topic, byte* payload, unsigned int length);
+
     bool connected;
     bool WiFiOffline;
     unsigned long last_connected;
     unsigned long last_force_connected;
     unsigned long last_query_time;
     bool queried;
+    bool update = false;
     Preferences prefs;
+    AwsFunctions awsFunctions;
 };
 
 #endif

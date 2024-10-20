@@ -1,8 +1,7 @@
 #include "MeshNetwork.h"
 
-
-MeshNetwork::MeshNetwork(const char* prefix, const char* password, uint16_t port)
-    : meshPrefix(prefix), meshPassword(password), meshPort(port), firmwareReader() {}
+MeshNetwork::MeshNetwork(const char* prefix, const char* password, uint16_t port, FirmwareUpdate* update)
+    : meshPrefix(prefix), meshPassword(password), meshPort(port), firmwareUpdate(update) {}
 
 void MeshNetwork::init() {
     WiFi.mode(WIFI_AP_STA);
@@ -40,102 +39,23 @@ size_t MeshNetwork::getConnectedNodes() {
 
 void MeshNetwork::receivedCallback(uint32_t from, String &msg) {
     Serial.printf("Received from %u msg=%s\n", from, msg.c_str());
-    if (msg.startsWith("IDENTITY:")) {
+
+    if (msg.startsWith("FIRMWARE_VERSION:")) {
+        String version = msg.substring(17);
+        sendMessage("FIRMWARE_REQUEST");
+    } else if (msg.startsWith("FIRMWARE_CHUNK:")) {
+        processFirmwareChunk(msg);
+    } else if (msg == "FIRMWARE_END") {
+        finalizeFirmwareUpdate();
+    } else if (msg == "FIRMWARE_REQUEST") {
+        startFirmwareDistribution();
+    } else if (msg.startsWith("IDENTITY:")) {
         processIdentityMessage(from, msg);
     } else if (msg.startsWith("LEDGER:")) {
         processLedgerMessage(from, msg);
-    } else if (msg.startsWith("FIRMWARE_CHUNK:")) {
-        processFirmwareChunk(from, msg);
-    } else if (msg == "REQUEST_FIRMWARE") {
-        sendFirmware("/firmware.bin"); // Assuming the firmware file is named firmware.bin
     }
 }
 
-void MeshNetwork::sendFirmware(const String& filename) {
-    if (!SPIFFS.begin(true)) {
-        Serial.println("An error has occurred while mounting SPIFFS");
-        return;
-    }
-
-    File file = SPIFFS.open(filename, "r");
-    if (!file) {
-        Serial.println("Failed to open file for reading");
-        return;
-    }
-
-    size_t fileSize = file.size();
-    size_t chunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-    for (size_t i = 0; i < chunks; i++) {
-        sendFirmwareChunk(0, filename, i); // 0 means broadcast to all nodes
-    }
-
-    file.close();
-}
-
-void MeshNetwork::sendFirmwareChunk(uint32_t to, const String& filename, size_t chunkIndex) {
-    File file = SPIFFS.open(filename, "r");
-    if (!file) {
-        Serial.println("Failed to open file for reading");
-        return;
-    }
-
-    file.seek(chunkIndex * CHUNK_SIZE);
-    String chunk = file.readString();
-    file.close();
-
-    String msg = "FIRMWARE_CHUNK:" + String(chunkIndex) + ":" + String(chunk.length()) + ":" + chunk;
-    if (to == 0) {
-        mesh.sendBroadcast(msg);
-    } else {
-        mesh.sendSingle(to, msg);
-    }
-}
-
-void MeshNetwork::processFirmwareChunk(uint32_t from, const String& msg) {
-    int firstColon = msg.indexOf(':', 15); // Start after "FIRMWARE_CHUNK:"
-    int secondColon = msg.indexOf(':', firstColon + 1);
-
-    size_t chunkIndex = msg.substring(15, firstColon).toInt();
-    size_t chunkSize = msg.substring(firstColon + 1, secondColon).toInt();
-    String chunkData = msg.substring(secondColon + 1);
-
-    if (chunkIndex == 0) {
-        incomingFirmwareFilename = "/incoming_firmware.bin";
-        firmwareChunks.clear();
-        expectedChunks = (chunkSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        receivedChunks = 0;
-    }
-
-    if (chunkIndex < expectedChunks) {
-        firmwareChunks.push_back(chunkData);
-        receivedChunks++;
-
-        if (receivedChunks == expectedChunks) {
-            assembleFirmware();
-        }
-    }
-}
-
-void MeshNetwork::assembleFirmware() {
-    if (!SPIFFS.begin(true)) {
-        Serial.println("An error has occurred while mounting SPIFFS");
-        return;
-    }
-
-    File file = SPIFFS.open(incomingFirmwareFilename, "w");
-    if (!file) {
-        Serial.println("Failed to open file for writing");
-        return;
-    }
-
-    for (const auto& chunk : firmwareChunks) {
-        file.print(chunk);
-    }
-
-    file.close();
-    Serial.println("Firmware file assembled and saved");
-}
 
 void MeshNetwork::newConnectionCallback(uint32_t nodeId) {
     Serial.printf("New Connection, nodeId = %u\n", nodeId);
@@ -222,4 +142,96 @@ void MeshNetwork::sendUniqueTimestampedFirmwareHash() {
         String message = "FIRMWARE_HASH:" + hashWithTimestamp;
         sendMessage(message);
     }
+}
+
+
+// =============================== Update stuff ======================================
+
+void MeshNetwork::startFirmwareDistribution() {
+    if (!firmwareUpdate || !firmwareUpdate->begin()) {
+        Serial.println("Failed to start firmware distribution");
+        return;
+    }
+
+    String versionMsg = "FIRMWARE_VERSION:" + firmwareUpdate->getVersion();
+    sendMessage(versionMsg);
+
+    sendNextFirmwareChunk();
+}
+
+void MeshNetwork::sendNextFirmwareChunk() {
+    if (!firmwareUpdate) return;
+
+    uint8_t buffer[CHUNK_SIZE];
+    size_t bytesRead;
+
+    if (firmwareUpdate->getNextChunk(buffer, bytesRead)) {
+        String chunkMsg = "FIRMWARE_CHUNK:" + String(firmwareUpdate->getProgress()) + ":";
+        chunkMsg += String((char*)buffer, bytesRead);
+        sendMessage(chunkMsg);
+
+        xTaskCreatePinnedToCore(
+            [](void* param) {
+                MeshNetwork* network = static_cast<MeshNetwork*>(param);
+                network->sendNextFirmwareChunk();
+                vTaskDelete(NULL);
+            }, "sendNextChunk",3000, this, 1, NULL, 1);
+    } else {
+        String endMsg = "FIRMWARE_END";
+        sendMessage(endMsg);
+        firmwareUpdate->end();
+    }
+}
+
+void MeshNetwork::processFirmwareChunk(const String& msg) {
+    int firstColon = msg.indexOf(':');
+    int secondColon = msg.indexOf(':', firstColon + 1);
+    
+    if (firstColon == -1 || secondColon == -1) {
+        Serial.println("Invalid firmware chunk message");
+        return;
+    }
+
+    float progress = msg.substring(firstColon + 1, secondColon).toFloat();
+    String chunkData = msg.substring(secondColon + 1);
+
+    static bool updateStarted = false;
+
+    if (!updateStarted) {
+        updateStarted = Update.begin(UPDATE_SIZE_UNKNOWN);
+        if (!updateStarted) {
+            Serial.println("Failed to start update");
+            return;
+        }
+    }
+
+    if (Update.write((uint8_t*)chunkData.c_str(), chunkData.length()) != chunkData.length()) {
+        Serial.println("Failed to write firmware chunk");
+        Update.abort();
+        updateStarted = false;
+        return;
+    }
+
+    Serial.printf("Firmware update progress: %.2f%%\n", progress * 100);
+}
+
+void MeshNetwork::finalizeFirmwareUpdate() {
+    if (!Update.isFinished()) {
+        Serial.println("Firmware update not finished");
+        Update.abort();
+        return;
+    }
+
+    if (!Update.end()) {
+        Serial.println("Failed to end update");
+        return;
+    }
+
+    if (Update.hasError()) {
+        Serial.println("Update error: " + String(Update.getError()));
+        return;
+    }
+
+    Serial.println("Firmware update successful. Rebooting...");
+    ESP.restart();
 }
